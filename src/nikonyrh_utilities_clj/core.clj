@@ -4,7 +4,6 @@
             [clojure.data.csv :as csv]
             [clojure.string :as string]
             [clojure.java.io :as io])
-  (:import java.util.zip.GZIPInputStream)
   (:gen-class))
 
 (set! *warn-on-reflection* true)
@@ -23,19 +22,21 @@
       (.digest (java.security.MessageDigest/getInstance type))
       (map fun))))
 
-(defn to-hex [data] (.substring (Integer/toString (+ (bit-and data 0xff) 0x100) 16) 1))
-(defn sha1-hash [data] (->> (get-hash "sha1" data to-hex) (apply str)))
-(defn sha1-hash-numeric [data] (get-hash "sha1" data int))
+(defn to-hex            [data] (.substring (Integer/toString (+ (bit-and data 0xff) 0x100) 16) 1))
+(defn sha1-hash         [data] (->> (get-hash "sha1" data to-hex) (apply str)))
+(defn sha1-hash-numeric [data]      (get-hash "sha1" data int))
 
 ; http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
-(defn my-println [& more]
+(defn my-println
+  "Print to *out* in a thread-safe manner"
+  [& more]
   (do (.write *out* (str (t/local-time) " " (clojure.string/join "" more) "\n"))
       (flush)))
 
 (defn getenv
-  "Get environment variable's value, converts empty strings to nils"
+  "Get environment variable's value, treats empty strings as nils"
   ([key]         (getenv key nil))
-  ([key default] (let [value (System/getenv key)] (if (-> value count pos?) value default))))
+  ([key default] (let [value (System/getenv key)] (if (empty? value) default value))))
 
 (defn my-distinct
   "Returns distinct values from a seq, as defined by id-getter. Not thread safe!"
@@ -44,6 +45,8 @@
         seen?    (fn [id] (if-not (contains? @seen-ids id)
                             (vswap! seen-ids conj id)))]
     (filter (comp seen? id-getter) coll)))
+; (my-distinct identity "abracadabra")
+; (->> {:id (mod (* i i) 21) :value i} (for [i (range 50)]) (my-distinct :id) (map :value))
 
 (defn make-sampler
   "Partitions input coll randomly into chunks of length n, returns them until exausted and then re-shuffles them."
@@ -56,6 +59,7 @@
                            (->> coll shuffle (partition n) (into []))
                            (subvec reserve 1))))
                first))))
+; (repeatedly 10 (make-sampler 4 (range 12)))
 
 (defmacro make-parser [f]
   `(fn [^String v#] (if-not (empty? v#)
@@ -75,7 +79,7 @@
      :float             double-parser
      :latlon          #(if-not (= % "0") (double-parser %))
      :keyword         #(let [s (string/trim %)] (if-not (empty? s) s))
-     :basic-datetime   (make-parser basic-parser)})
+     :datetime         (make-parser basic-parser)})
 
   (defn datetime-to-str [datetime]
     (let [d (->> datetime str (filter digits) (apply str))
@@ -87,28 +91,63 @@
 (defn day-of-week [^java.time.LocalDateTime datetime]
    (-> datetime .getDayOfWeek .getValue))
 
-; This seemed like a good idea... note that .tar.gz file produces carbage to the beginning of the header row :(
-(defmacro read-csv [type fname body]
+; At first this seemed like a good idea... This way you don't need to load
+; the whole file into memory but you can instead process it lazily.
+; Note that .tar.gz file produces carbage to the beginning of the header row :(
+; fname can be either an absolute path, or a relative path within the resources folder.
+(defmacro read-csv
+  "Sets up a lazy sequence to rows symbol, which can be used in body as needed."
+  [type fname body]
   (let [decoder (case type
                   :gz   ['java.util.zip.GZIPInputStream.]
                   :zip  ['java.util.zip.ZipInputStream.]
                   :zlib ['java.util.zip.InflaterInputStream.]
                   [])]
-    `(let [fname#  ~fname
-           fname#  (if (= \/ (first fname#)) fname# (io/resource fname#))]
+    `(let [fname#   ~fname
+           fname#   (if (= \/ (first fname#)) fname# (io/resource fname#))]
        (with-open [rdr# (-> fname# io/file io/input-stream ~@decoder)]
-         (let [contents# (-> rdr# io/reader csv/read-csv)
+         (let [_#        (if (= :zip ~type) (.getNextEntry ^java.util.zip.ZipInputStream rdr#))
+               contents# (-> rdr# io/reader csv/read-csv)
                header#   (->> contents# first (map (comp keyword string/lower-case string/trim)))
                n-cols#   (count header#)
-               ~'rows    (->> contents# rest (filter #(>= (count %) n-cols#)) (map #(zipmap header# %)))]
+               ~'rows    (->> contents# rest (filter #(>= (count %) n-cols#))
+                                             (map    #(zipmap header# %)))]
            ~body)))))
-; (read-csv :csv "green_tripdata_2013-08.csv" (doall rows))
 
 (comment
+  "The body can be arbitrary code which uses the 'rows' symbol"
   (let [fname "green_tripdata_2013-08.csv"]
     (clojure.pprint/pprint
-      [(read-csv :csv  fname               (-> rows first))
-       (read-csv :gz   (str fname ".gz")   (-> rows first))
-       (read-csv :zip  (str fname ".zip")  (-> rows first))
-       (read-csv :zlib (str fname ".zlib") (-> rows first))])))
+      [(read-csv :csv  fname               (->  rows first))
+       (read-csv :gz   (str fname ".gz")   (->  rows count))
+       (read-csv :zip  (str fname ".zip")  (->  rows first keys sort))
+       (read-csv :zlib (str fname ".zlib") (->> rows first (into (sorted-map))))])))
 
+(defmacro read-csv-with-mapping
+  "Provide a mapping from column keywords to pre-defined functions at 'parsers', or bring your own."
+  [type fname mapping body]
+  `(let [mapping# (into [] (for [[k# v#] ~mapping]
+                             (if-not (sequential? v#)
+                               [k# k# (if (keyword? v#) (~'parsers v#) v#)]
+                               (let [[fv# sv#] v#]
+                                 [k# sv# (if (keyword? fv#) (~'parsers fv#) fv#)]))))]
+    (read-csv ~type ~fname
+      (let [~'rows (for [row# ~'rows]
+                     (into {} (for [[k-in# k-out# parser#] mapping#]
+                                [k-out# (-> row# k-in# parser#)])))]
+        ~body))))
+
+(comment
+  (let [to-float (fn [^String s] (if-not (empty? s) (Float. s)))
+        fname    "green_tripdata_2013-08.csv"
+        mapping {:pickup_latitude       [:latlon   :lat]
+                 :pickup_longitude      [to-float  :lon]
+                 :lpep_pickup_datetime  [:datetime :pickup_dt]
+                 :passenger_count        :int
+                 :fare_amount            :float
+                 :total_amount            to-float
+                 :store_and_fwd_flag     :keyword
+                 :trip_type              :keyword}]
+    (clojure.pprint/pprint
+      [(read-csv              :csv fname         (nth rows 8))
+       (read-csv-with-mapping :csv fname mapping (nth rows 8))])))
