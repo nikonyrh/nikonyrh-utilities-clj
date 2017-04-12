@@ -8,6 +8,8 @@
 
 (set! *warn-on-reflection* true)
 
+(def write-csv csv/write-csv)
+
 ; From https://gist.github.com/xpe/46128da5accb0acdf30d
 (defn iterate-until-stable
   "Takes a function of one arg and calls (f x), (f (f x)), and so on
@@ -72,14 +74,14 @@
       double-parser     (make-parser Double.)
       digits            (into #{\T} (for [i (range 10)] (first (str i))))
       assert-len       #(if (= (count %2) %) %2 (throw (Exception. (str "Expected length " % ", got '" %2 "'!"))))
-      basic-parser     #(->> % (re-seq #"[0-9]+") (map int-parser) (apply t/local-date-time))]
+      datetime         #(->> % (re-seq #"[0-9]+") (map int-parser) (apply t/local-date-time))]
 
   (def parsers
     {:int               int-parser
      :float             double-parser
      :latlon          #(if-not (= % "0") (double-parser %))
      :keyword         #(let [s (string/trim %)] (if-not (empty? s) s))
-     :datetime         (make-parser basic-parser)})
+     :datetime         (make-parser datetime)})
 
   (defn datetime-to-str [datetime]
     (let [d (->> datetime str (filter digits) (apply str))
@@ -90,6 +92,11 @@
 
 (defn day-of-week [^java.time.LocalDateTime datetime]
    (-> datetime .getDayOfWeek .getValue))
+
+(defn time-of-day
+  "A float between 0.0 and 23.99972222222"
+  [^java.time.LocalDateTime datetime]
+  (-> datetime (t/as :second-of-day) (/ 3600.0)))
 
 ; At first this seemed like a good idea... This way you don't need to load
 ; the whole file into memory but you can instead process it lazily.
@@ -130,12 +137,33 @@
                              (if-not (sequential? v#)
                                [k# k# (if (keyword? v#) (~'parsers v#) v#)]
                                (let [[fv# sv#] v#]
-                                 [k# sv# (if (keyword? fv#) (~'parsers fv#) fv#)]))))]
+                                 [k# sv# (if (keyword? fv#) (~'parsers fv#) fv#)]))))
+         missing-parsers#   (into [] (for [[k-in# k-out# parser#] mapping# :when (nil? parser#)] {:from k-in# :to k-out#}))
+         _#                 (if-not (empty? missing-parsers#)
+                              (throw (Exception. (str "Some columns have unidentified parsers: " missing-parsers#))))]
     (read-csv ~type ~fname
-      (let [~'rows (for [row# ~'rows]
+      (let [orig-cols# (-> ~'rows first keys set)
+            ~'rows (for [row# ~'rows]
                      (into {} (for [[k-in# k-out# parser#] mapping#]
-                                [k-out# (-> row# k-in# parser#)])))]
+                                (if (contains? row# k-in#)
+                                  [k-out# (-> k-in# row# parser#)]))))
+            mapping-source-cols# (->> mapping# (map first) set)
+            mapping-target-cols# (->> mapping# (map second) set)
+            mapped-cols#         (-> ~'rows first keys set)
+            missing#             (clojure.set/difference mapping-target-cols# mapped-cols#)
+            _#        (if-not (empty? missing#)
+                        (do
+                         (my-println "")
+                         (my-println "Existing columns in CSV: "        (sort orig-cols#))
+                         (my-println "Source columns in mapping: "      (sort mapping-source-cols#))
+                         (my-println "Target columns in mapping: "      (sort mapping-target-cols#))
+                         (my-println "Existing columns after mapping: " (sort mapped-cols#))
+                         (throw (Exception. (str "Columns " missing# " not found from " ~fname)))))]
         ~body))))
+
+(comment
+  (read-csv-with-mapping :csv "green_tripdata_2013-08.csv" {:not-found :float} (first rows))
+  (read-csv-with-mapping :csv "green_tripdata_2013-08.csv" {:tip_amount :not-found} (first rows)))
 
 (comment
   (let [to-float (fn [^String s] (if-not (empty? s) (Float. s)))
