@@ -110,9 +110,16 @@
                   :zip  ['java.util.zip.ZipInputStream.]
                   :zlib ['java.util.zip.InflaterInputStream.]
                   [])]
-    `(let [fname#   ~fname
-           fname#   (if (= \/ (first fname#)) fname# (io/resource fname#))]
-       (with-open [rdr# (-> fname# io/file io/input-stream ~@decoder)]
+    `(let [fname-orig#   ~fname
+         ; TODO: Windows vs. Linux/Unix check. Basically this tries to identify absolute paths
+           fname#   (-> (if (or (= \/ (nth fname-orig# 0))
+                                (= \: (nth fname-orig# 1)))
+                          fname-orig#
+                          (io/resource fname-orig#))
+                        io/file)]
+       (assert (some?   fname#) (str "File '" fname-orig# "' not found from resources!"))
+       (assert (.exists fname#) (str "File '" fname#      "' not found!"))
+       (with-open [rdr# (-> fname# io/input-stream ~@decoder)]
          (let [_#        (if (= :zip ~type) (.getNextEntry ^java.util.zip.ZipInputStream rdr#))
                contents# (-> rdr# io/reader csv/read-csv)
                header#   (->> contents# first (map (comp keyword string/lower-case string/trim)))
