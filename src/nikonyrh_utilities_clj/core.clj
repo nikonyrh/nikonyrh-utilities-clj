@@ -186,3 +186,12 @@
     (clojure.pprint/pprint
       [(read-csv              :csv fname         (nth rows 8))
        (read-csv-with-mapping :csv fname mapping (nth rows 8))])))
+
+
+; Ref. https://stackoverflow.com/a/9200642/3731823
+(defn glob
+  "Find files and folders within a path, filter by re-seq, returns absolute path strings"
+  [folder re]
+  (->> folder io/file file-seq
+       (map (fn [^java.io.File f] (.getAbsolutePath f)))
+       (filter #(re-find re %))))
