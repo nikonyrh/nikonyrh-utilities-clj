@@ -8,6 +8,16 @@
 
 (set! *warn-on-reflection* true)
 
+
+(defmacro zipfor [i coll & forms]
+  `(let [c# ~coll] (zipmap c# (for [~i c#] (do ~@forms)))))
+; (macroexpand '(zipfor i [1 2 3 4] (inc i)))
+
+
+(defmacro hashfor [& forms] `(->> (for ~@forms) (into {})))
+; (macroexpand '(hashfor [i (range 10)] [(dec i) (inc i)]))
+
+
 (def write-csv csv/write-csv)
 
 ; From https://gist.github.com/xpe/46128da5accb0acdf30d
@@ -41,12 +51,12 @@
   ([key default] (let [value (System/getenv key)] (if (empty? value) default value))))
 
 (defn my-distinct
-  "Returns distinct values from a seq, as defined by id-getter. Not thread safe!"
+  "Returns distinct values from a seq, as defined by id-getter."
   [id-getter coll]
-  (let [seen-ids (volatile! #{})
+  (let [seen-ids (atom #{})
         seen?    (fn [id] (if-not (contains? @seen-ids id)
-                            (vswap! seen-ids conj id)))]
-    (filter (comp seen? id-getter) coll)))
+                            (swap! seen-ids conj id)))]
+    (->> coll (filter (comp seen? id-getter)))))
 ; (my-distinct identity "abracadabra")
 ; (->> {:id (mod (* i i) 21) :value i} (for [i (range 50)]) (my-distinct :id) (map :value))
 
@@ -93,6 +103,9 @@
 (defn day-of-week [^java.time.LocalDateTime datetime]
    (-> datetime .getDayOfWeek .getValue))
 
+(defn datetime-to-epoch [^java.time.LocalDateTime dt]
+  (-> dt (.atZone java.time.ZoneOffset/UTC) .toInstant .getEpochSecond))
+
 (defn time-of-day
   "A float between 0.0 and 23.99972222222"
   [^java.time.LocalDateTime datetime]
@@ -137,6 +150,7 @@
        (read-csv :zip  (str fname ".zip")  (->  rows first keys sort))
        (read-csv :zlib (str fname ".zlib") (->> rows first (into (sorted-map))))])))
 
+
 (defmacro read-csv-with-mapping
   "Provide a mapping from column keywords to pre-defined functions at 'parsers', or bring your own."
   [type fname mapping body]
@@ -145,15 +159,15 @@
                                [k# k# (if (keyword? v#) (~'parsers v#) v#)]
                                (let [[fv# sv#] v#]
                                  [k# sv# (if (keyword? fv#) (~'parsers fv#) fv#)]))))
-         missing-parsers#   (into [] (for [[k-in# k-out# parser#] mapping# :when (nil? parser#)] {:from k-in# :to k-out#}))
+         missing-parsers#   (->> (for [[k-in# k-out# parser#] mapping# :when (nil? parser#)] {:from k-in# :to k-out#}) (into []))
          _#                 (if-not (empty? missing-parsers#)
                               (throw (Exception. (str "Some columns have unidentified parsers: " missing-parsers#))))]
     (read-csv ~type ~fname
       (let [orig-cols# (-> ~'rows first keys set)
             ~'rows (for [row# ~'rows]
-                     (into {} (for [[k-in# k-out# parser#] mapping#]
-                                (if (contains? row# k-in#)
-                                  [k-out# (-> k-in# row# parser#)]))))
+                     (hashfor [[k-in# k-out# parser#] mapping#]
+                       (if (contains? row# k-in#)
+                         [k-out# (-> k-in# row# parser#)])))
             mapping-source-cols# (->> mapping# (map first) set)
             mapping-target-cols# (->> mapping# (map second) set)
             mapped-cols#         (-> ~'rows first keys set)
@@ -170,9 +184,8 @@
 
 (comment
   (read-csv-with-mapping :csv "green_tripdata_2013-08.csv" {:not-found :float} (first rows))
-  (read-csv-with-mapping :csv "green_tripdata_2013-08.csv" {:tip_amount :not-found} (first rows)))
-
-(comment
+  (read-csv-with-mapping :csv "green_tripdata_2013-08.csv" {:tip_amount :not-found} (first rows))
+  
   (let [to-float (fn [^String s] (if-not (empty? s) (Float. s)))
         fname    "green_tripdata_2013-08.csv"
         mapping {:pickup_latitude       [:latlon   :lat]
@@ -195,3 +208,35 @@
   (->> folder io/file file-seq
        (map (fn [^java.io.File f] (.getAbsolutePath f)))
        (filter #(re-find re %))))
+
+; Ref. https://stackoverflow.com/a/21404281/3731823
+(defn periodically [f interval]
+  (doto (Thread.
+          #(try
+             (while (not (.isInterrupted (Thread/currentThread)))
+               (f)
+               (Thread/sleep interval))
+             (catch InterruptedException _)))
+    (.start)))
+
+; Ref. https://stackoverflow.com/a/35885
+;      "Returns the name representing the running Java virtual machine. The returned name string can be any
+;       arbitrary string and a Java virtual machine implementation can choose to embed platform-specific useful
+;       information in the returned name string. Each running virtual machine could have a different name."
+(defn get-pid []
+  (-> (java.lang.management.ManagementFactory/getRuntimeMXBean) .getName (clojure.string/split #"@") first str (Integer.)))
+
+
+(defn round
+  ([^Double n] (round 3 n))
+  ([^Integer p ^Double n]
+   (let [p (Math/pow 10.0 p)]
+     (when n (-> n (* p) Math/round (/ p))))))
+
+
+(defmacro make-routes [request & args]
+  `(condp #(some->> %2 :uri (re-find %) rest) ~request
+     ~@(->> (for [[regex f-args f-body] (partition 3 args)] [regex :>> (list 'fn [f-args] f-body)])
+            (apply concat))))
+; To be used in the context of matching routes on Ring HTTP server.
+; (->> '(make-routes req #"a" [a] a #"b" [b] b) macroexpand-1 pprint)
