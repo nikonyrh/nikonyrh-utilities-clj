@@ -8,47 +8,58 @@
 
 (set! *warn-on-reflection* true)
 
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Wrappers for the magnificent "for" :D See macroexpands for details
 (defmacro zipfor [i coll & forms]
-  `(let [c# ~coll] (zipmap c# (for [~i c#] (do ~@forms)))))
-; (macroexpand '(zipfor i [1 2 3 4] (inc i)))
-
+  `(let [coll# ~coll]
+     (let [c# coll#] (zipmap c# (for [~i c#] (do ~@forms))))))
+; (->> '(zipfor i [1 2 3 4] (inc i)) macroexpand pprint)
 
 (defmacro hashfor [& forms] `(->> (for ~@forms) (into {})))
 ; (macroexpand '(hashfor [i (range 10)] [(dec i) (inc i)]))
 
+(defmacro catfor [seq-exprs body]
+  (let [inner     (gensym)
+        seq-exprs (conj seq-exprs inner body)]
+    `(for ~seq-exprs ~inner)))
+; (->> '(catfor [i (range 10)] (range i)) macroexpand-1 pprint)
 
-(def write-csv csv/write-csv)
 
-; From https://gist.github.com/xpe/46128da5accb0acdf30d
-(defn iterate-until-stable
-  "Takes a function of one arg and calls (f x), (f (f x)), and so on
-  until the value does not change."
-  [x f] (loop [v x] (let [v' (f v)] (if (= v' v) v (recur v')))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Utility macros for parallelism, also have a look at https://github.com/TheClimateCorporation/claypoole
 
-; https://gist.github.com/prasincs/827272
-(defn get-hash [type data fun]
-  (let [data (if (string? data) data (pr-str data))]
-    (->>
-      (.getBytes ^String data)
-      (.digest (java.security.MessageDigest/getInstance type))
-      (map fun))))
+; Ref. https://stackoverflow.com/a/6697469/3731823
+(defmacro with-timeout [millis & body]
+  `(let [future# (future ~@body)]
+    (try
+      (.get future# ~millis java.util.concurrent.TimeUnit/MILLISECONDS)
+      (catch java.util.concurrent.TimeoutException x# 
+        (do
+          (future-cancel future#)
+          nil)))))
+; (with-timeout 10 (println "start") (Thread/sleep 50) (println "end") true)
 
-(defn to-hex            [data] (.substring (Integer/toString (+ (bit-and data 0xff) 0x100) 16) 1))
-(defn sha1-hash         [data] (->> (get-hash "sha1" data to-hex) (apply str)))
-(defn sha1-hash-numeric [data]      (get-hash "sha1" data int))
+(defmacro dopar [& forms]
+  (let [futures (->> (for [form forms] `(future ~form)) (into []))]
+    `(->> ~futures (map deref) doall)))
+; (->> '(dopar (do (Thread/sleep 200) (my-println "jee2")) (do (Thread/sleep 100) (my-println "jee1")))  macroexpand pprint)
 
-; http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
-(defn my-println
-  "Print to *out* in a thread-safe manner"
-  [& more]
-  (do (.write *out* (str (t/local-time) " " (clojure.string/join "" more) "\n"))
-      (flush)))
+(defmacro doparseq [seq-exprs & body]
+  (let [futures `(for ~seq-exprs (future (do ~@body)))]
+    `(doseq [f# ~futures] (deref f#))))
+; (->> '(doparseq [i (range 5)] (Thread/sleep (->> i (* 100) (- 600))) (my-println i)) macroexpand-1 pprint)
 
-(defn getenv
-  "Get environment variable's value, treats empty strings as nils"
-  ([key]         (getenv key nil))
-  ([key default] (let [value (System/getenv key)] (if (empty? value) default value))))
+
+(defmacro make-routes [request & args]
+  `(condp #(some->> %2 :uri (re-find %) rest) ~request
+     ~@(->> (for [[regex f-args f-body] (partition 3 args)] [regex :>> (list 'fn [f-args] f-body)])
+            (apply concat))))
+; To be used in the context of matching routes on Ring HTTP server.
+; (->> '(make-routes req #"a" [a] a #"b" [b] b) macroexpand-1 pprint)
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Utilies for data processing
 
 (defn my-distinct
   "Returns distinct values from a seq, as defined by id-getter."
@@ -72,6 +83,69 @@
                            (subvec reserve 1))))
                first))))
 ; (repeatedly 10 (make-sampler 4 (range 12)))
+
+; From https://gist.github.com/xpe/46128da5accb0acdf30d
+(defn iterate-until-stable
+  "Takes a function of one arg and calls (f x), (f (f x)), and so on
+  until the value does not change."
+  [x f] (loop [v x] (let [v' (f v)] (if (= v' v) v (recur v')))))
+
+; https://gist.github.com/prasincs/827272
+(defn get-hash [type data fun]
+  (let [data (if (string? data) data (pr-str data))]
+    (->>
+      (.getBytes ^String data)
+      (.digest (java.security.MessageDigest/getInstance type))
+      (map fun))))
+
+(defn to-hex            [data] (.substring (Integer/toString (+ (bit-and data 0xff) 0x100) 16) 1))
+(defn sha1-hash         [data] (->> (get-hash "sha1" data to-hex) (apply str)))
+(defn sha1-hash-numeric [data]      (get-hash "sha1" data int))
+
+; Ref. https://stackoverflow.com/a/21404281/3731823
+(defn periodically [f interval]
+  (doto (Thread.
+          #(try
+             (while (not (.isInterrupted (Thread/currentThread)))
+               (f)
+               (Thread/sleep interval))
+             (catch InterruptedException _)))
+    (.start)))
+
+(defn round
+  ([^Double n] (round 3 n))
+  ([^Integer p ^Double n]
+   (let [p (Math/pow 10.0 p)]
+     (when n (-> n (* p) Math/round (/ p))))))
+
+; Ref. https://stackoverflow.com/a/6713290
+(defn copy-to-clipboard [^String s]
+  (-> (java.awt.Toolkit/getDefaultToolkit)
+      .getSystemClipboard
+      (.setContents (java.awt.datatransfer.StringSelection. s) nil)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Utilities for stuff like env variables, thread-safe timestamped printing and string parsing
+
+; http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
+(defn my-println
+  "Print to *out* in a thread-safe manner"
+  [& more]
+  (do (.write *out* (str (t/local-time) " " (clojure.string/join "" more) "\n"))
+      (flush)))
+
+(defn getenv
+  "Get environment variable's value, treats empty strings as nils"
+  ([key]         (getenv key nil))
+  ([key default] (let [value (System/getenv key)] (if (empty? value) default value))))
+
+; Ref. https://stackoverflow.com/a/35885
+;      "Returns the name representing the running Java virtual machine. The returned name string can be any
+;       arbitrary string and a Java virtual machine implementation can choose to embed platform-specific useful
+;       information in the returned name string. Each running virtual machine could have a different name."
+(defn get-pid []
+  (-> (java.lang.management.ManagementFactory/getRuntimeMXBean) .getName (clojure.string/split #"@") first str (Integer.)))
 
 (defmacro make-parser [f]
   `(fn [^String v#] (if-not (empty? v#)
@@ -110,6 +184,12 @@
   "A float between 0.0 and 23.99972222222"
   [^java.time.LocalDateTime datetime]
   (-> datetime (t/as :second-of-day) (/ 3600.0)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; CSV parsing
+
+(def write-csv csv/write-csv)
 
 ; At first this seemed like a good idea... This way you don't need to load
 ; the whole file into memory but you can instead process it lazily.
@@ -199,44 +279,3 @@
     (clojure.pprint/pprint
       [(read-csv              :csv fname         (nth rows 8))
        (read-csv-with-mapping :csv fname mapping (nth rows 8))])))
-
-
-; Ref. https://stackoverflow.com/a/9200642/3731823
-(defn glob
-  "Find files and folders within a path, filter by re-seq, returns absolute path strings"
-  [folder re]
-  (->> folder io/file file-seq
-       (map (fn [^java.io.File f] (.getAbsolutePath f)))
-       (filter #(re-find re %))))
-
-; Ref. https://stackoverflow.com/a/21404281/3731823
-(defn periodically [f interval]
-  (doto (Thread.
-          #(try
-             (while (not (.isInterrupted (Thread/currentThread)))
-               (f)
-               (Thread/sleep interval))
-             (catch InterruptedException _)))
-    (.start)))
-
-; Ref. https://stackoverflow.com/a/35885
-;      "Returns the name representing the running Java virtual machine. The returned name string can be any
-;       arbitrary string and a Java virtual machine implementation can choose to embed platform-specific useful
-;       information in the returned name string. Each running virtual machine could have a different name."
-(defn get-pid []
-  (-> (java.lang.management.ManagementFactory/getRuntimeMXBean) .getName (clojure.string/split #"@") first str (Integer.)))
-
-
-(defn round
-  ([^Double n] (round 3 n))
-  ([^Integer p ^Double n]
-   (let [p (Math/pow 10.0 p)]
-     (when n (-> n (* p) Math/round (/ p))))))
-
-
-(defmacro make-routes [request & args]
-  `(condp #(some->> %2 :uri (re-find %) rest) ~request
-     ~@(->> (for [[regex f-args f-body] (partition 3 args)] [regex :>> (list 'fn [f-args] f-body)])
-            (apply concat))))
-; To be used in the context of matching routes on Ring HTTP server.
-; (->> '(make-routes req #"a" [a] a #"b" [b] b) macroexpand-1 pprint)
