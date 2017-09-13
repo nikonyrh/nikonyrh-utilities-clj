@@ -49,7 +49,6 @@
     `(doseq [f# ~futures] (deref f#))))
 ; (->> '(doparseq [i (range 5)] (Thread/sleep (->> i (* 100) (- 600))) (my-println i)) macroexpand-1 pprint)
 
-
 (defmacro make-routes [request & args]
   `(condp #(some->> %2 :uri (re-find %) rest) ~request
      ~@(->> (for [[regex f-args f-body] (partition 3 args)] [regex :>> (list 'fn [f-args] f-body)])
@@ -279,3 +278,28 @@
     (clojure.pprint/pprint
       [(read-csv              :csv fname         (nth rows 8))
        (read-csv-with-mapping :csv fname mapping (nth rows 8))])))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; This masterpiece is a helpful wrapper when you've got an exception but you
+; lost track on what is actually going on. If the "form" causes an exception
+; then this annotates it with specific values of all symbols in the form.
+; Note that it cannot wrap let or for clauses, as not all used symbols can
+; be resolved at the "root" context.
+(defmacro with-catch [form]
+  (let [symbols     (->> form flatten (filter symbol?) (remove resolve) set (into []))
+        symbol-strs (->> symbols (map str) (into []))]
+    `(try ~form
+       (catch Exception e#
+         (let [info# {:form    (read-string ~(str form))
+                      :symbols (into (sorted-map) (zipmap (map symbol ~symbol-strs) ~symbols))}]
+           (clojure.pprint/pprint info#)
+           (throw (ex-info (str e#) (assoc info# :exception e#))))))))
+
+; (->> '(with-catch (+ a b c)) macroexpand pprint))
+
+; (for [[i j] (partition 2 1 [1 2 3 4 "5" 6 7])] (with-catch (+ i j)))
+; ExceptionInfo java.lang.ClassCastException: java.lang.String cannot be cast to java.lang.Number
+
+; (-> *e ex-data (dissoc :exception) pprint)
+; {:form (+ i j), :symbols {i 4, j "5"}}
