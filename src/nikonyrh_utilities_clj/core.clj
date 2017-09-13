@@ -131,8 +131,13 @@
 (defn my-println
   "Print to *out* in a thread-safe manner"
   [& more]
-  (do (.write *out* (str (t/local-time) " " (clojure.string/join "" more) "\n"))
+  (do (.write *out* (str (clojure.string/join "" more) "\n"))
       (flush)))
+
+(defn my-println-ts
+  "Print to *out* in a thread-safe manner"
+  [& more]
+  (apply my-println (t/local-time) " " more))
 
 (defn getenv
   "Get environment variable's value, treats empty strings as nils"

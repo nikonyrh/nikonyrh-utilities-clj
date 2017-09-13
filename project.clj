@@ -1,4 +1,4 @@
-(defproject org.clojars.nikonyrh.utilities-clj "0.3.0"
+(defproject org.clojars.nikonyrh.utilities-clj "1.0.0"
   :description "Clojure utilities"
   :url         "https://github.com/nikonyrh/nikonyrh-utilities-clj"
   :license {:name "Apache License, Version 2.0"
