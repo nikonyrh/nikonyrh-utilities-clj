@@ -101,6 +101,19 @@
 (defn sha1-hash         [data] (->> (get-hash "sha1" data to-hex) (apply str)))
 (defn sha1-hash-numeric [data]      (get-hash "sha1" data int))
 
+; Ref. http://www.javacreed.com/how-to-generate-sha1-hash-value-of-file/
+(defn sha1-file [fname]
+  (with-open [in (clojure.java.io/input-stream fname)]
+    (let [sha1   (java.security.MessageDigest/getInstance "sha1")
+          buffer (byte-array (bit-shift-left 1 16))]
+      (loop [n (.read in buffer)]
+        (if (pos? n)
+          (do (.update sha1 buffer 0 n)
+              (recur (.read in buffer)))
+          (->> (.digest sha1)
+               (map to-hex)
+               (apply str)))))))
+
 ; Ref. https://stackoverflow.com/a/21404281/3731823
 (defn periodically [f interval]
   (doto (Thread.
