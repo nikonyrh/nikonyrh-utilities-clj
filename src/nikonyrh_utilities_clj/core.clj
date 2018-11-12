@@ -3,7 +3,9 @@
             [clojure.data.json :as json]
             [clojure.data.csv :as csv]
             [clojure.string :as string]
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            
+            [com.climate.claypoole :as cp])
   (:gen-class))
 
 (set! *warn-on-reflection* true)
@@ -49,11 +51,24 @@
     `(doseq [f# ~futures] (deref f#))))
 ; (->> '(doparseq [i (range 5)] (Thread/sleep (->> i (* 100) (- 600))) (my-println i)) macroexpand-1 pprint)
 
+(defmacro threadpool-defn [n-threads name & forms]
+  `(let [~'threadpool (cp/threadpool ~(max 1 (eval n-threads)) :name ~(str "threadpool:" name))]
+    (~'defn ~name ~@forms)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(let [regex #"\{([^:]+):([^\}]+)\}"]
+  (defmacro my-format [fmt]
+    (let [fmt (eval fmt)]
+      `(format ~(clojure.string/replace fmt regex "$1")
+               ~@(for [[_ type-str sym-str] (re-seq regex fmt)] (symbol sym-str))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; To be used in the context of matching routes on Ring HTTP server.
 (defmacro make-routes [request & args]
   `(condp #(some->> %2 :uri (re-find %) rest) ~request
      ~@(->> (for [[regex f-args f-body] (partition 3 args)] [regex :>> (list 'fn [f-args] f-body)])
             (apply concat))))
-; To be used in the context of matching routes on Ring HTTP server.
 ; (->> '(make-routes req #"a" [a] a #"b" [b] b) macroexpand-1 pprint)
 
 
@@ -64,7 +79,7 @@
   "Returns distinct values from a seq, as defined by id-getter."
   [id-getter coll]
   (let [seen-ids (atom #{})
-        seen?    (fn [id] (if-not (contains? @seen-ids id)
+        seen?    (fn [id] (when-not (contains? @seen-ids id)
                             (swap! seen-ids conj id)))]
     (->> coll (filter (comp seen? id-getter)))))
 ; (my-distinct identity "abracadabra")
