@@ -336,3 +336,100 @@
 
 ; (-> *e ex-data (dissoc :exception) pprint)
 ; {:form (+ i j), :symbols {i 4, j "5"}}
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; A stand-alone implementation of SHA256, because why not? :)
+; But dealing with signed integers wasn't fun.
+(defn long->bytes [L]
+  (let [L (long L)]
+    (for [i [56 48 40 32 24 16 8 0]]
+      (-> (Long/rotateRight L i)
+          (bit-and 0xFF)))))
+
+(let [min-integer (Integer/rotateLeft 1 31)]
+  (defn long->int [^long l]
+    (int (+ (if (>= l 2147483648) min-integer 0) (bit-and l 2147483647)))))
+
+(defn bytes->int [[a b c d]]
+  (long->int (+ (long d) (Long/rotateLeft c 8) (Long/rotateLeft b 16) (Long/rotateLeft a 24))))
+
+(defn str->int32 [^String s]
+  (let [L (-> s count (* 8))
+        K (->> (mod (+ L 64) 512) (- 512 1 7))]
+      (->> (concat s [(bit-shift-left 1 7)] (repeat (quot K 8) 0) (long->bytes L))
+           (map int)
+           (partition 4)
+           (map bytes->int))))
+
+(let [H-init (mapv long->int [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19])
+      K (->> (map  long->int [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+                              0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+                              0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+                              0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+                              0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+                              0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+                              0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+                              0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]) int-array)
+      
+      chunk-size      (quot 512 32)
+      upper-bit       (bit-shift-left 1 31)
+      lower-mask      (dec upper-bit)
+      bit-not         (fn [i] (int (bit-xor i (int -1))))
+      bit-xor         (comp int bit-xor)
+      
+      bit-shift-right (fn [a b] (bit-shift-right
+                                  (+ (bit-and a lower-mask)
+                                     (if (neg? a) upper-bit 0))
+                                  b))
+      
+      W-extend-fn (fn W-extend-fn [i W delta rot0 rot1 shift0]
+                    (let [w (W (+ i delta))]
+                      (assert (<= -2147483648 w 2147483647))
+                      (bit-xor (Integer/rotateRight w rot0)
+                               (Integer/rotateRight w rot1)
+                               (bit-shift-right     w shift0))))
+      
+      S-fn (fn S-fn [v i j k]
+             (assert (<= -2147483648 v 2147483647))
+             (bit-xor (Integer/rotateRight v i) (Integer/rotateRight v j) (Integer/rotateRight v k)))
+      
+      my-plus (fn [a b] (Integer/sum a (int b)))
+      +       (fn [& coll] (reduce my-plus (int 0) coll))
+      
+      to-hex (fn [^Integer i] (format "%08x" i))]
+  (defn sha256 [^String s]
+    (let [input (->> s str->int32 (partition chunk-size))]
+      (loop [[chunk & rest-input] input
+             [h0 h1 h2 h3 h4 h5 h6 h7] H-init]
+      ; (pprint [(map to-hex chunk) (map to-hex [h0 h1 h2 h3 h4 h5 h6 h7])])
+        (if-not chunk
+          (->> [h0 h1 h2 h3 h4 h5 h6 h7] (map to-hex) clojure.string/join)
+          (let [W (loop [i chunk-size W (vec chunk)]
+                    (if (= i 64) (int-array W)
+                      (recur (inc i)
+                             (conj W (+ (W (- i 16)) (W (- i 7))
+                                        (W-extend-fn i W -15  7 18  3)
+                                        (W-extend-fn i W  -2 17 19 10))))))]
+          ; (prn (map to-hex W))
+            (recur rest-input
+              (map +
+                [h0 h1 h2 h3 h4 h5 h6 h7]
+                (loop [i 0 h h7 g h6 f h5 e h4 d h3 c h2 b h1 a h0]
+                  (if (= i 64) [a b c d e f g h]
+                    (let [S1 (S-fn e 6 11 25)
+                          ch (bit-xor (bit-and e f) (bit-and (bit-not e) g))
+                          t1 (+ h S1 ch (nth K i) (nth W i))
+                          
+                          S0 (S-fn a 2 13 22)
+                          ma (bit-xor (bit-and a b) (bit-and a c) (bit-and b c))
+                          t2 (+ S0 ma)]
+                      (recur (inc i) g f e (+ d t1) c b a (+ t1 t2)))))))))))))
+
+
+(comment
+  (str->int32 "ABCD")
+  (count (str->int32 "ABC"))
+  
+  (assert (= (sha256 "ABCDE") "f0393febe8baaa55e32f7be2a7cc180bf34e52137d99e056c817a9c07b8f239a")))
