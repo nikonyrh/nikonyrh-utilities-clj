@@ -57,11 +57,14 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-(let [regex #"\{([^:]+):([^\}]+)\}"]
+(let [regex #"\{([^:\{\}]+):([^\}]+)\}"]
   (defmacro my-format [fmt]
     (let [fmt (eval fmt)]
       `(format ~(clojure.string/replace fmt regex "$1")
                ~@(for [[_ type-str sym-str] (re-seq regex fmt)] (symbol sym-str))))))
+
+(assert (= "test 123.46 case"         (let [a 123.456789] (my-format "test {%.2f:a} case"))))
+(assert (= "a { test 123.46 case } b" (let [a 123.456789] (my-format "a { test {%.2f:a} case } b"))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; To be used in the context of matching routes on Ring HTTP server.
